@@ -6,7 +6,8 @@ import mmap
 import struct
 import ctypes
 import yaml
-from urllib import request
+from threading import Thread
+from urllib import request, error
 from yaml.reader import Reader as YamlReader
 
 try:
@@ -14,15 +15,18 @@ try:
 except ImportError:
     from yaml import Loader as YamlLoader
 
-VERSION = '1.1.5.1'
+VERSION = '1.2.0'
 
 SIM_STATUS_URL = 'http://127.0.0.1:32034/get_sim_status?object=simStatus'
 
 MEMMAPFILE = 'Local\\IRSDKMemMapFileName'
-MEMMAPFILESIZE = 780 * 1024
+MEMMAPFILESIZE = 1164 * 1024
 BROADCASTMSGNAME = 'IRSDK_BROADCASTMSG'
 
 VAR_TYPE_MAP = ['c', '?', 'i', 'I', 'f', 'd']
+
+YAML_TRANSLATER = bytes.maketrans(b'\x81\x8D\x8F\x90\x9D', b'     ')
+YAML_CODE_PAGE = 'cp1252'
 
 class StatusField:
     status_connected = 1
@@ -74,6 +78,37 @@ class TrkLoc:
     aproaching_pits = 2
     on_track        = 3
 
+class TrkSurf:
+    not_in_world  = -1
+    undefined     =  0
+    asphalt_1     =  1
+    asphalt_2     =  2
+    asphalt_3     =  3
+    asphalt_4     =  4
+    concrete_1    =  5
+    concrete_2    =  6
+    racing_dirt_1 =  7
+    racing_dirt_2 =  8
+    paint_1       =  9
+    paint_2       = 10
+    rumble_1      = 11
+    rumble_2      = 12
+    rumble_3      = 13
+    rumble_4      = 14
+    grass_1       = 15
+    grass_2       = 16
+    grass_3       = 17
+    grass_4       = 18
+    dirt_1        = 19
+    dirt_2        = 20
+    dirt_3        = 21
+    dirt_4        = 22
+    sand          = 23
+    gravel_1      = 24
+    gravel_2      = 25
+    grasscrete    = 26
+    astroturf     = 27
+
 class SessionState:
     invalid     = 0
     get_in_car  = 1
@@ -118,15 +153,18 @@ class ChatCommandMode:
     cancel     = 3 # Close chat window
 
 class PitCommandMode: # this only works when the driver is in the car
-    clear       = 0 # Clear all pit checkboxes
-    ws          = 1 # Clean the winshield, using one tear off
-    fuel        = 2 # Add fuel, optionally specify the amount to add in liters or pass '0' to use existing amount
-    lf          = 3 # Change the left front tire, optionally specifying the pressure in KPa or pass '0' to use existing pressure
-    rf          = 4 # right front
-    lr          = 5 # left rear
-    rr          = 6 # right rear
-    clear_tires = 7 # Clear tire pit checkboxes
-    fr          = 8 # Request a fast repair
+    clear       =  0 # Clear all pit checkboxes
+    ws          =  1 # Clean the winshield, using one tear off
+    fuel        =  2 # Add fuel, optionally specify the amount to add in liters or pass '0' to use existing amount
+    lf          =  3 # Change the left front tire, optionally specifying the pressure in KPa or pass '0' to use existing pressure
+    rf          =  4 # right front
+    lr          =  5 # left rear
+    rr          =  6 # right rear
+    clear_tires =  7 # Clear tire pit checkboxes
+    fr          =  8 # Request a fast repair
+    clear_ws    =  9 # Uncheck Clean the winshield checkbox
+    clear_fr    = 10 # Uncheck request a fast repair
+    clear_fuel  = 11 # Uncheck add fuel
 
 class TelemCommandMode: # You can call this any time, but telemtry only records when driver is in there car
     stop    = 0 # Turn telemetry recording off
@@ -170,6 +208,14 @@ class PitSvFlags:
     fuel_fill          = 0x10
     windshield_tearoff = 0x20
     fast_repair        = 0x40
+
+class CarLeftRight:
+    clear          = 1 # no cars around us.
+    car_left       = 2 # there is a car to our left.
+    car_right      = 3 # there is a car to our right.
+    car_left_right = 4 # there are cars on each side.
+    two_cars_left  = 5 # there are two cars to our left.
+    two_cars_right = 6 # there are two cars to our right.
 
 class FFBCommandMode: # You can call this any time
     ffb_command_max_force = 0 # Set the maximum force when mapping steering torque force to direct input units (float in Nm)
@@ -238,13 +284,14 @@ class VarHeader(IRSDKStruct):
     type = IRSDKStruct.property_value(0, 'i')
     offset = IRSDKStruct.property_value(4, 'i')
     count = IRSDKStruct.property_value(8, 'i')
-
+    count_as_time = IRSDKStruct.property_value(12, '?')
     name = IRSDKStruct.property_value_str(16, '32s')
     desc = IRSDKStruct.property_value_str(48, '64s')
     unit = IRSDKStruct.property_value_str(112, '32s')
 
 class IRSDK:
-    def __init__(self):
+    def __init__(self, parse_yaml_async=False):
+        self.parse_yaml_async = parse_yaml_async
         self.is_initialized = False
         self.last_session_info_update = 0
 
@@ -300,7 +347,7 @@ class IRSDK:
                 with open(dump_to, 'wb') as f:
                     f.write(self._shared_mem)
             self._header = Header(self._shared_mem)
-            self.is_initialized = self._header.version == 1 and len(self._header.var_buf) > 0
+            self.is_initialized = self._header.version >= 1 and len(self._header.var_buf) > 0
 
         return self.is_initialized
 
@@ -322,7 +369,7 @@ class IRSDK:
         if not self.is_initialized:
             return
         f = open(to_file, 'w', encoding='utf-8')
-        f.write(self._shared_mem[self._header.session_info_offset:self._header.session_info_len].rstrip(b'\x00').decode('latin-1'))
+        f.write(self._shared_mem[self._header.session_info_offset:self._header.session_info_len].rstrip(b'\x00').decode(YAML_CODE_PAGE))
         f.write('\n'.join([
             '{:32}{}'.format(i, self[i])
             for i in sorted(self._var_headers_dict.keys(), key=str.lower)
@@ -375,7 +422,11 @@ class IRSDK:
         return self._broadcast_msg(BroadcastMsg.replay_search_session_time, session_num, session_time_ms)
 
     def _check_sim_status(self):
-        return 'running:1' in request.urlopen(SIM_STATUS_URL).read().decode('utf-8')
+        try:
+            return 'running:1' in request.urlopen(SIM_STATUS_URL).read().decode('utf-8')
+        except error.URLError as e:
+            print("Failed to connect to sim: {}".format(e.reason))
+            return False
 
     @property
     def _var_buffer_latest(self):
@@ -420,58 +471,70 @@ class IRSDK:
     def _get_session_info(self, key):
         if self.last_session_info_update < self._header.session_info_update:
             self.last_session_info_update = self._header.session_info_update
-            for sesData in self.__session_info_dict.values():
-                # keep previous parsed data, in case, binary data not changed
-                if sesData['data']:
-                    sesData['data_last'] = sesData['data']
-                sesData['data'] = None
+            for session_data in self.__session_info_dict.values():
+                # keep previous parsed data, in case binary data not changed
+                if session_data['data']:
+                    session_data['data_last'] = session_data['data']
+                session_data['data'] = None
 
         if key not in self.__session_info_dict:
             self.__session_info_dict[key] = dict(data=None)
 
-        sesData = self.__session_info_dict[key]
+        session_data = self.__session_info_dict[key]
 
         # already have and parsed
-        if sesData['data']:
-            return sesData['data']
+        if session_data['data']:
+            return session_data['data']
+
+        if self.parse_yaml_async:
+            if 'async_session_info_update' not in session_data or session_data['async_session_info_update'] < self.last_session_info_update:
+                session_data['async_session_info_update'] = self.last_session_info_update
+                Thread(target=self._parse_yaml, args=(key, session_data)).start()
+        else:
+            self._parse_yaml(key, session_data)
+        return session_data['data']
+
+    def _parse_yaml(self, key, session_data):
+        session_info_update = self.last_session_info_update
 
         start = self._header.session_info_offset
         end = self._header.session_info_len
 
         # search section by key
         self._shared_mem.seek(0)
-        start = self._shared_mem.find(('\n%s:\n' % key).encode('latin-1'), start, end)
-        end = self._shared_mem.find(b'\n\n', start, end)
+        start = self._shared_mem.find(('\n%s:\n' % key).encode(YAML_CODE_PAGE), start, end)
+        match_end = re.compile(b'\n\w').search(self._shared_mem, start + 1, end)
+        if match_end:
+            end = match_end.start()
         data_binary = self._shared_mem[start:end]
 
         # section not found
         if not data_binary:
-            if 'data_last' in sesData:
-                return sesData['data_last']
+            if 'data_last' in session_data:
+                return session_data['data_last']
             else:
-                del self.__session_info_dict[key]
                 return None
 
         # is binary data the same as last time?
-        if 'data_binary' in sesData and data_binary == sesData['data_binary'] and 'data_last' in sesData:
-            sesData['data'] = sesData['data_last']
-            return sesData['data']
-        sesData['data_binary'] = data_binary
+        if 'data_binary' in session_data and data_binary == session_data['data_binary'] and 'data_last' in session_data:
+            session_data['data'] = session_data['data_last']
+            return session_data['data']
+        session_data['data_binary'] = data_binary
 
         # parsing
-        yaml_src = re.sub(YamlReader.NON_PRINTABLE, '', data_binary.rstrip(b'\x00').decode('latin-1'))
+        yaml_src = re.sub(YamlReader.NON_PRINTABLE, '', data_binary.translate(YAML_TRANSLATER).rstrip(b'\x00').decode(YAML_CODE_PAGE))
         if key == 'DriverInfo':
             def team_name_replace(m):
                 return 'TeamName: "%s"' % re.sub(r'(["\\])', '\\\\\\1', m.group(1))
             yaml_src = re.sub(r'TeamName: (.*)', team_name_replace, yaml_src)
         result = yaml.load(yaml_src, Loader=YamlLoader)
-        if result:
-            sesData['data'] = result[key]
-            if sesData['data']:
-                sesData['update'] = self.last_session_info_update
-            elif 'data_last' in sesData:
-                sesData['data'] = sesData['data_last']
-        return sesData['data']
+        # check if result is available, and yaml data is not updated while we were parsing it in async mode
+        if result and (not self.parse_yaml_async or self.last_session_info_update == session_info_update):
+            session_data['data'] = result[key]
+            if session_data['data']:
+                session_data['update'] = session_info_update
+            elif 'data_last' in session_data:
+                session_data['data'] = session_data['data_last']
 
     @property
     def _broadcast_msg_id(self):
@@ -619,4 +682,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
