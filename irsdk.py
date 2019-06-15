@@ -438,7 +438,8 @@ class IRSDK:
         try:
             return 'running:1' in request.urlopen(SIM_STATUS_URL).read().decode('utf-8')
         except error.URLError as e:
-            print("Failed to connect to sim: {}".format(e.reason))
+            if not args.silent:
+                print("Failed to connect to sim: {}".format(e.reason))
             return False
 
     @property
@@ -687,6 +688,7 @@ def main():
     parser.add_argument('--test', help='use test file as irsdk mmap')
     parser.add_argument('--dump', help='dump irsdk mmap to file')
     parser.add_argument('--parse', help='parse current irsdk mmap to file')
+    parser.add_argument('--silent', help='do not print any output')
     args = parser.parse_args()
 
     ir = IRSDK()
