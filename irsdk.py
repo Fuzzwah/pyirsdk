@@ -343,7 +343,8 @@ class IRSDK:
             self.__var_headers_names = [var_header.name for var_header in self._var_headers]
         return self.__var_headers_names
 
-    def startup(self, test_file=None, dump_to=None):
+    def startup(self, test_file=None, dump_to=None, silent=False):
+        self.silent = silent
         if test_file is None and not self._check_sim_status():
             return False
 
@@ -438,7 +439,7 @@ class IRSDK:
         try:
             return 'running:1' in request.urlopen(SIM_STATUS_URL).read().decode('utf-8')
         except error.URLError as e:
-            if not args.silent:
+            if not self.silent:
                 print("Failed to connect to sim: {}".format(e.reason))
             return False
 
@@ -692,7 +693,7 @@ def main():
     args = parser.parse_args()
 
     ir = IRSDK()
-    ir.startup(test_file=args.test, dump_to=args.dump)
+    ir.startup(test_file=args.test, dump_to=args.dump, silent=args.silent)
 
     if args.parse:
         ir.parse_to(args.parse)
