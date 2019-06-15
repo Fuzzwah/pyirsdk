@@ -15,7 +15,7 @@ try:
 except ImportError:
     from yaml import Loader as YamlLoader
 
-VERSION = '1.2.0'
+VERSION = '1.2.3'
 
 SIM_STATUS_URL = 'http://127.0.0.1:32034/get_sim_status?object=simStatus'
 
@@ -304,6 +304,8 @@ class IRSDK:
         self.__var_buffer_latest = None
         self.__session_info_dict = {}
         self.__broadcast_msg_id = None
+        self.__is_using_test_file = False
+        self.__workaround_connected_state = 0
 
     def __getitem__(self, key):
         if key in self._var_headers_dict:
@@ -319,7 +321,17 @@ class IRSDK:
 
     @property
     def is_connected(self):
-        return self._header and self._header.status == StatusField.status_connected
+        if self._header:
+            if self._header.status == StatusField.status_connected:
+                self.__workaround_connected_state = 0
+            if self.__workaround_connected_state == 0 and self._header.status != StatusField.status_connected:
+                self.__workaround_connected_state = 1
+            if self.__workaround_connected_state == 1 and (self['SessionNum'] is None or self.__is_using_test_file):
+                self.__workaround_connected_state = 2
+            if self.__workaround_connected_state == 2 and self['SessionNum'] is not None:
+                self.__workaround_connected_state = 3
+        return self._header is not None and \
+            (self._header.status == StatusField.status_connected or self.__workaround_connected_state == 3)
 
     @property
     def session_info_update(self):
@@ -339,6 +351,7 @@ class IRSDK:
             if test_file:
                 f = open(test_file, 'rb')
                 self._shared_mem = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+                self.__is_using_test_file = True
             else:
                 self._shared_mem = mmap.mmap(0, MEMMAPFILESIZE, MEMMAPFILE, access=mmap.ACCESS_READ)
 
@@ -527,6 +540,8 @@ class IRSDK:
             def team_name_replace(m):
                 return 'TeamName: "%s"' % re.sub(r'(["\\])', '\\\\\\1', m.group(1))
             yaml_src = re.sub(r'TeamName: (.*)', team_name_replace, yaml_src)
+        if key == 'WeekendInfo':
+            yaml_src = re.sub(r'Date: (.*)', 'Date: "\\1"', yaml_src)
         result = yaml.load(yaml_src, Loader=YamlLoader)
         # check if result is available, and yaml data is not updated while we were parsing it in async mode
         if result and (not self.parse_yaml_async or self.last_session_info_update == session_info_update):
